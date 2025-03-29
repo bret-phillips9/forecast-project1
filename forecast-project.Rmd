@@ -1,0 +1,324 @@
+---
+title: "forecast-project"
+author: "Bret Phillips"
+date: "2025-03-15"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+## Load Required Libraries
+
+```{r}
+library(forecast)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+```
+
+## Import Data
+
+```{r}
+time_raw <- read.csv("./dataset_for_technical_assessment.csv")
+summary(time_raw)
+```
+
+# Data Cleaning and Preprocessing
+
+Above, we see 74 records with NAs. There is no choice about those missing y values; they must be deleted.  Any remaining missing on the X's can be mean-imputed, which appears to affect only one additional record.
+
+## Data Cleaning
+
+```{r}
+time_clean <- time_raw |> 
+     # delete missing y's, impute missing x's
+     filter(!is.na(y1)) |> 
+     filter(!is.na(y2)) |> 
+     mutate(x1 = ifelse(is.na(x1), mean(x1, na.rm = TRUE), x1)) |> 
+     mutate(x2 = ifelse(is.na(x2), mean(x2, na.rm = TRUE), x2)) |> 
+     mutate(x3 = ifelse(is.na(x3), mean(x3, na.rm = TRUE), x3)) |> 
+     mutate(x4 = ifelse(is.na(x4), mean(x4, na.rm = TRUE), x4)) |> 
+     mutate(x5 = ifelse(is.na(x5), mean(x5, na.rm = TRUE), x5)) |> 
+     mutate(x6 = ifelse(is.na(x6), mean(x6, na.rm = TRUE), x6)) |> 
+     mutate(x7 = ifelse(is.na(x7), mean(x7, na.rm = TRUE), x7)) |> 
+     mutate(x8 = ifelse(is.na(x8), mean(x8, na.rm = TRUE), x8)) |> 
+     as.data.frame()  
+     
+summary(time_clean)
+
+
+```
+
+## Time Intelligence
+
+Our date-time variable imported as character. This is not useful. We use lubridate to convert it to an actual date-time variable called timestamp. The original character variable is discarded.
+
+```{r}
+time_clean <- time_clean |> 
+     mutate(timestamp = ymd_hms(Description)) |> 
+     mutate(day = ymd(substr(Description, start = 1, stop=10))) |> 
+     mutate(hour = paste("2016-09-30 ", format(timestamp, "%H:%M:%S"))) |> 
+     mutate(from_start = timestamp - timestamp[1]) |> 
+     select(-Description)
+
+summary(time_clean$timestamp)
+
+
+```
+
+## Train-Validation Split
+
+The original exercise calls for using whatever models are dervied on the training data to the next two weeks of data.  However, this would require X data from those two weeks and these data were not provided.  Therefore, we will hold back the last two weeks of data from our dataset (4032 obs) as our validation sample to satisfy this portion of the assignment.
+
+```{r}
+time_val <- tail(time_clean, n = 4032)
+
+time_train <- setdiff(time_clean, time_val)
+```
+
+
+# Exploratory Data Analysis
+
+There is so much data here, it may be difficult to get a good feel for trends. Thus, I separated the training data into day and time dimensions so the data may be summarized each way to get a better sense of it, before a full ARIMA model is attempted. Time data alone cannot be used as an index for ARIMA models in R, so I append the date 2016-09-30 to all the time values in the hourly data set.
+
+```{r}
+daily <- time_train |> 
+     group_by(day) |> 
+     summarize(y1 = mean(y1),
+               y2 = mean(y2),
+               x1 = mean(x1),
+               x2 = mean(x2),
+               x3 = mean(x3),
+               x4 = mean(x4),
+               x5 = mean(x5),
+               x6 = mean(x6),
+               x7 = mean(x7),
+               x8 = mean(x8)) 
+
+hourly <- time_train |> 
+     group_by(hour) |> 
+     summarize(y1 = mean(y1),
+               y2 = mean(y2),
+               x1 = mean(x1),
+               x2 = mean(x2),
+               x3 = mean(x3),
+               x4 = mean(x4),
+               x5 = mean(x5),
+               x6 = mean(x6),
+               x7 = mean(x7),
+               x8 = mean(x8)) 
+
+
+```
+
+
+
+## Y1
+
+### Raw Data
+
+We begin with plotting the Y1 values over time.
+
+```{r}
+ggplot(daily, aes(x=day, y=y1)) +
+     geom_point()
+
+ggplot(hourly, aes(x=hour, y=y1)) +
+     geom_point()
+
+
+```
+
+### ACF and PACF
+
+Now we plot the autocorrelation and partial autocorrelation functions, to get a sense of the error structure of Y1.
+
+```{r}
+y1_day <- ts(daily$y1, daily$day)
+
+Acf(x = y1_day, main = "Autocorrelation Function for Y1 by Day")
+Pacf(x = y1_day, main = "Partial Autocorrelation Function for Y1 by Day")
+
+y1_hour <- ts(hourly$y1, as.POSIXct(hourly$hour))
+
+Acf(x = y1_hour, main = "Autocorrelation Function for Y1 by Hour")
+Pacf(x = y1_hour, main = "Partial Autocorrelation Function for Y1 by Hour")
+```
+
+The gradual descent of the ACFs show that the data are non-stationary.  The PACFs for daily data show a spike at lags 1, 2, and 3, indicating the need for AR terms.
+
+## Y2
+
+### Raw Data
+
+Similarly, we plot the values of Y2 over time.
+
+```{r}
+ggplot(daily, aes(x=day, y=y2)) +
+     geom_point()
+
+ggplot(hourly, aes(x=hour, y=y2)) +
+     geom_point()
+
+
+```
+
+### ACF and PACF
+
+And check the autocorrelation and partial autocorrelation functions.
+
+```{r}
+y2_day <- ts(daily$y2, daily$day)
+
+Acf(x = y2_day, main = "Autocorrelation Function for Y2 by Day")
+Pacf(x = y2_day, main = "Partial Autocorrelation Function for Y2 by Day")
+
+y2_hour <- ts(hourly$y2, as.POSIXct(hourly$hour))
+
+Acf(x = y2_hour, main = "Autocorrelation Function for Y2 by Hour")
+Pacf(x = y2_hour, main = "Partial Autocorrelation Function for Y2 by Hour")
+```
+
+The ACFs and PACFs for Y2 are highly similar to Y1.
+
+# Forecasting
+
+Prep the time series objects using the ts function from base R.  Also, auto.arima requires that regressors be passed as a matrix object, so we prepare that matrix too.
+
+```{r}
+y1_train <- ts(time_train$y1, time_train$timestamp)
+
+y2_train <- ts(time_train$y2, time_train$timestamp)
+
+# also prep predictor matrix, which applies to both models
+x_train <- as.matrix(time_train[, c(3:10)])
+
+# and, of course, we must also do this for the validation data
+y1_val <- ts(time_val$y1, time_val$timestamp)
+
+y2_val <- ts(time_val$y2, time_val$timestamp)
+
+# also prep predictor matrix, which applies to both models
+x_val <- as.matrix(time_val[, c(3:10)])
+
+```
+
+## Y1
+
+### Null Model
+
+To understand the effect of the predictors, we begin with a null model that does not contain predictors.
+
+```{r}
+y1_null <- auto.arima(y = y1_train)
+summary(y1_null)
+```
+
+The auto.arima algorithm included 2 AR and 4 MA terms, which is not surprising given the results of the ACF and PACF plots.
+
+Now we add the regressors into the ARIMA model.
+
+### Full Model
+
+```{r}
+y1_fit <- auto.arima(y = y1_train, xreg = x_train)
+summary(y1_fit)
+```
+Interestingly, the inclusion of regressors required additional AR and MA terms.
+
+Because the null and full models are of different (p, d, q) orders, a direct comparison of AICs or BICs is not informative.  However, we can see that RMSE of the full model is only .0006 lower than that of the null model, indicating that not much useful variance is captured by the predictors.
+
+### Residuals - Full Model
+
+Below we plot the residuals of the full (5, 1, 5) ARIMA model.
+
+```{r}
+tsdisplay(residuals(y1_fit), lag.max = 40, main = "Y1 (5,1,5) Full Model Residuals - Training Data")
+```
+
+The plots suggest that perhaps the model is biased, but I am not sure.
+
+### Forecast for Next 14 Days
+
+As noted above, to complete the next portion of the assignment, we will refer to our validation data.  Specifically, the x_val data, which contain our new regressor data.
+
+```{r}
+y1_fcast <- forecast(y1_fit, xreg = x_val)
+
+plot(y1_fcast)
+```
+
+Forecasting on the validation data looks about right on average, though the error band is wide.  Since we already know the predictors don't help much, this makes sense.
+
+Let's examine the distribution of residuals to see what the actual performance was.
+
+```{r}
+time_val$resid1 <- time_val$y1 - y1_fcast$mean
+
+summary(time_val$resid1)
+boxplot(time_val$resid1)
+```
+
+Residuals confirm that the model is very biased.
+
+We now turn to Y2.
+
+## Y2
+
+### Null Model
+
+```{r}
+y2_null <- auto.arima(y = y2_train)
+summary(y2_null)
+```
+
+### Full Model
+
+```{r}
+y2_fit <- auto.arima(y = y2_train, xreg = x_train)
+summary(y2_fit)
+```
+
+Interestingly, the regressors seem to have replaced the moving average terms for y2.  Here, again we see only a slight decline in RMSE (about .0004) so the regressors don't seem to be capturing much of interest.
+
+### Residuals - Full Model
+
+```{r}
+tsdisplay(residuals(y2_fit), lag.max = 40, main = "Y2 (3,1,0) Full Model Residuals - Training Data")
+```
+
+### Forecast for Next 14 Days 
+
+Again, we evaluate our model by forecasting on the validation data.
+
+```{r}
+y2_fcast <- forecast(y2_fit, xreg = x_val)
+
+plot(y2_fcast)
+```
+
+```{r}
+time_val$resid2 <- time_val$y2 - y2_fcast$mean
+
+summary(time_val$resid2)
+boxplot(time_val$resid2)
+```
+
+Results are similar to the forecasting of y1 in terms of accuracy, though obviously here we are predicting near-zero values of y2 over the next two weeks and bias is in the opposite direction.
+
+# Conclusion
+
+The data are poorly behaved and lead to poor modeling.  The data appear to me as though there are large systemic interruptions that are not accounted for by the predictors or the error structure.  
+
+It is not clear if tuning the (p, d, q) hyperparameters would improve the model fit. The auto.arima function is supposed to find the optimal AIC/BIC, but perhaps it can get stuck in a local minimum.
+
+Another idea would be to build an LSTM model to see if the fit can be improved.
